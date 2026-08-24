@@ -301,6 +301,35 @@ def calc_score(inputs, images, points3d, extrinsic, args):
             score = 0.0
     return i, j, score
 
+def write_sfm_correspondences(save_folder, images, points3d, num_images, scale_factor):
+    """Write per-image 2D<->3D correspondence files DVP-MVS's APD reads from
+    `<dense_folder>/sfm/%08d.txt` (used by the FIRST_INIT depth-prior scale fitting).
+    Format: one line per registered keypoint: "x_2d y_2d x_3d y_3d z_3d r g b".
+    """
+    sfm_dir = os.path.join(save_folder, 'sfm')
+    if os.path.exists(sfm_dir):
+        print("remove:{}".format(sfm_dir))
+        shutil.rmtree(sfm_dir)
+    os.makedirs(sfm_dir)
+
+    for i in range(num_images):
+        image = images[i + 1]
+        lines = []
+        for (x, y), point3d_id in zip(image.xys, image.point3D_ids):
+            if point3d_id == -1 or point3d_id not in points3d:
+                continue
+            point = points3d[point3d_id]
+            r, g, b = point.rgb
+            lines.append('%f %f %f %f %f %d %d %d' % (
+                x / scale_factor, y / scale_factor,
+                point.xyz[0], point.xyz[1], point.xyz[2],
+                int(r), int(g), int(b)))
+        with open(os.path.join(sfm_dir, '%08d.txt' % i), 'w') as f:
+            f.write('\n'.join(lines))
+            if lines:
+                f.write('\n')
+
+
 def processing_single_scene(args):
 
     image_dir = os.path.join(args.dense_folder, 'images')
@@ -355,6 +384,8 @@ def processing_single_scene(args):
         new_images[i+1] = images[image_id]
     images = new_images
 
+    write_sfm_correspondences(args.save_folder, images, points3d, num_images, scale_factor)
+
     # extrinsic
     extrinsic = {}
     for image_id, image in images.items():
@@ -373,7 +404,7 @@ def processing_single_scene(args):
             if p3d_id == -1:
                 continue
             transformed = np.matmul(extrinsic[i+1], [points3d[p3d_id].xyz[0], points3d[p3d_id].xyz[1], points3d[p3d_id].xyz[2], 1])
-            zs.append(np.asscalar(transformed[2]))
+            zs.append(float(transformed[2]))
         depth_min = 0
         depth_max = 0
         if len(zs) != 0:

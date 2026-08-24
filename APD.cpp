@@ -548,18 +548,28 @@ void ProjectCamera(const float3 PointX, const Camera camera, float2& point, floa
 bool ReadBinMat(const path& mat_path, cv::Mat& mat)
 {
 	ifstream in(mat_path, std::ios_base::binary);
-	if (in.bad()) {
+	// in.bad() alone doesn't catch a missing/unopenable file -- that only sets
+	// failbit, not badbit. Checking is_open() (and leaving `mat` untouched, its
+	// caller-supplied default) is what makes a missing file a safe, detectable
+	// failure instead of undefined behavior below.
+	if (!in.is_open()) {
 		std::cerr << "Error opening file: " << mat_path << std::endl;
 		return false;
 	}
 
-	int version, rows, cols, type;
+	// Zero-initialized: if the stream is already bad by the time we get here, or
+	// goes bad partway through these reads, istream::read() is a no-op and would
+	// otherwise leave these as uninitialized stack garbage. That garbage clearing
+	// "version != 1" by coincidence (which does happen -- non-deterministically,
+	// depending on stack reuse) used to fall through to cv::Mat(garbage, garbage,
+	// garbage), corrupting memory or throwing deep inside OpenCV.
+	int version = 0, rows = 0, cols = 0, type = 0;
 	in.read((char*)(&version), sizeof(int));
 	in.read((char*)(&rows), sizeof(int));
 	in.read((char*)(&cols), sizeof(int));
 	in.read((char*)(&type), sizeof(int));
 
-	if (version != 1) {
+	if (!in || version != 1 || rows < 0 || cols < 0) {
 		in.close();
 		std::cerr << "Version error: " << mat_path << std::endl;
 		return false;
@@ -651,9 +661,26 @@ bool WriteBinMat(const path& mat_path, const cv::Mat& mat) {
 bool ReadCamera(const path& cam_path, Camera& cam)
 {
 	ifstream in(cam_path);
-	if (in.bad()) {
+	// in.bad() alone doesn't catch a missing/unopenable file -- that only sets
+	// failbit, not badbit -- same defect class as ReadBinMat above. `cam` is a
+	// plain aggregate (no default member initializers) that every call site
+	// passes in as a fresh, uninitialized local, so a silently-failed read here
+	// used to leave R/t/K/c/depth_min/depth_max as stack garbage instead of
+	// failing loudly.
+	if (!in.is_open()) {
 		return false;
 	}
+
+	// Zero out before reading: operator>> on a stream that has already failed
+	// (e.g. a truncated file) leaves its target unchanged rather than writing
+	// anything, so a partial parse failure partway through would otherwise still
+	// leave the not-yet-read fields as garbage even though we return false below.
+	std::fill(std::begin(cam.R), std::end(cam.R), 0.0f);
+	std::fill(std::begin(cam.t), std::end(cam.t), 0.0f);
+	std::fill(std::begin(cam.K), std::end(cam.K), 0.0f);
+	std::fill(std::begin(cam.c), std::end(cam.c), 0.0f);
+	cam.depth_min = 0.0f;
+	cam.depth_max = 0.0f;
 
 	std::string line;
 	in >> line;
@@ -687,8 +714,12 @@ bool ReadCamera(const path& cam_path, Camera& cam)
 	//in >> cam.depth_min >> interval;
 	//cam.depth_max = interval * depth_num + cam.depth_min;
 	////====================================================================
+	if (!in) {
+		std::cerr << "Malformed camera file: " << cam_path << std::endl;
+		return false;
+	}
 	in.close();
-	return true;;
+	return true;
 }
 
 bool ShowDepthMap(const path& depth_path, const cv::Mat& depth, float depth_min, float depth_max)
@@ -1142,6 +1173,7 @@ void APD::InuputInitialization() {
 		std::cout << "Scale images and cameras done\n";
 	}
 	std::cout << "Image size: " << width << " * " << height << std::endl;
+	std::cerr << "CKPTA geom_consistency=" << params_host.geom_consistency << " use_APD=" << params_host.use_APD << " state=" << params_host.state << std::endl;
 	// =================================================
 	// read depth form geom consistency
 	if (params_host.geom_consistency) { //YZL 后面除了第一轮，都需要用到深度来计算可见性
@@ -1215,12 +1247,14 @@ void APD::InuputInitialization() {
 		path ref_dep_folder = dep_folder / path(ToFormatIndex(problem.ref_image_id) + ".dmb");
 		cv::Mat dep;
 		ReadBinMat(ref_dep_folder, dep);
+		std::cerr << "CKPT1 dep.rows=" << dep.rows << " dep.cols=" << dep.cols << std::endl;
 
 		for (int y = 0; y < dep.rows; y++) {
 			for (int x = 0; x < dep.cols; x++) {
 				dep.at<float>(y, x) = 255 - (dep.at<float>(y, x));
 			}
 		}
+		std::cerr << "CKPT2 flip done" << std::endl;
 
 		path ref_sfm_folder = sfm_folder / path(ToFormatIndex(problem.ref_image_id) + ".txt");
 
@@ -1246,6 +1280,7 @@ void APD::InuputInitialization() {
 			xy_temp.push_back(make_float2(x_2d, y_2d));
 			xyz_temp.push_back(make_float3(x_3d, y_3d, z_3d));
 		}
+		std::cerr << "CKPT3 xy_temp.size()=" << xy_temp.size() << std::endl;
 
 		//std::cout << "xyz_temp: " << xyz_temp[0].x << xyz_temp[0].y << xyz_temp[0].z << std::endl;
 		//std::cout << "xyz_temp.size(): " << xyz_temp.size() << std::endl;
@@ -1267,6 +1302,7 @@ void APD::InuputInitialization() {
 			}
 		}
 
+		std::cerr << "CKPT4 rates.size()=" << rates.size() << " xy_temps.size()=" << xy_temps.size() << std::endl;
 		float rate_max = 0;
 		for (int i = 0; i < rates.size(); i++) {
 			rate_max = MAX(rate_max, rates[i]);
@@ -1274,11 +1310,13 @@ void APD::InuputInitialization() {
 		}
 
 		float middle_rate = rates[rates.size() / 2];
+		std::cerr << "CKPT5 middle_rate=" << middle_rate << " rate_max=" << rate_max << std::endl;
 		for (int y = 0; y < dep.rows; y++) {
 			for (int x = 0; x < dep.cols; x++) {
 				all_rate_map.at<float>(y, x) = middle_rate;
 			}
 		}
+		std::cerr << "CKPT6 all_rate_map fill done" << std::endl;
 
 		//std::cout << "middle_rate: " << middle_rate << std::endl;
 		path ref_image_path = image_folder / path(ToFormatIndex(problem.ref_image_id) + ".jpg");
@@ -1304,10 +1342,12 @@ void APD::InuputInitialization() {
 			}
 		}
 
+		std::cerr << "CKPT7 before COLMAP imwrite" << std::endl;
 		path colmap_img_path = problem.result_folder / path("COLMAP_" + std::to_string(problem.iteration) + ".jpg");
 		cv::imwrite(colmap_img_path.string(), image_A);
 		const cv::Rect imageRC(0, 0, dep.cols, dep.rows);
 		const auto triangles = DelaunayTriangulation(dep.cols, dep.rows, imageRC, xy_temps, rates);
+		std::cerr << "CKPT8 triangles.size()=" << triangles.size() << std::endl;
 
 		for (const auto triangle : triangles) {
 			if (imageRC.contains(triangle.pt1) && imageRC.contains(triangle.pt2) && imageRC.contains(triangle.pt3)) {
@@ -1317,10 +1357,12 @@ void APD::InuputInitialization() {
 			}
 		}
 
+		std::cerr << "CKPT9 before Tri imwrite" << std::endl;
 		path triangulation_path = problem.result_folder / path("Tri_" + std::to_string(problem.iteration) + ".jpg");
 		cv::imwrite(triangulation_path.string(), srcImage);
 		cv::Mat_<float> mask_tri = cv::Mat::zeros(dep.rows, dep.cols, CV_32FC1);
 		uint32_t idx = 0;
+		std::cerr << "CKPT9b mask_tri allocated" << std::endl;
 
 		for (const auto triangle : triangles) {
 			if (imageRC.contains(triangle.pt1) && imageRC.contains(triangle.pt2) && imageRC.contains(triangle.pt3)) {
@@ -1335,6 +1377,15 @@ void APD::InuputInitialization() {
 						int x = p * triangle.pt1.x + q * triangle.pt2.x + (1.0 - p - q) * triangle.pt3.x;
 						int y = p * triangle.pt1.y + q * triangle.pt2.y + (1.0 - p - q) * triangle.pt3.y;
 
+						// Barycentric interpolation of a float p/q can round a pixel one step past
+						// the image bounds even though all three triangle vertices are in-bounds
+						// (imageRC.contains checks above). Mat_::operator()/.at<float>() bounds
+						// checks are compiled out under NDEBUG (Release), so an unguarded write here
+						// silently corrupts adjacent heap memory instead of throwing.
+						if (x < 0 || x >= dep.cols || y < 0 || y >= dep.rows) {
+							continue;
+						}
+
 						mask_tri(y, x) = idx + 1.0; // To distinguish from the label of non-triangulated areas	
 
 						ThreePoint A = { triangle.pt1.x, triangle.pt1.y, triangle.rate1 };
@@ -1348,19 +1399,23 @@ void APD::InuputInitialization() {
 				idx++;
 			}
 		}
+		std::cerr << "CKPT10 rasterization loop done, idx=" << idx << std::endl;
 
 		for (int y = 0; y < dep.rows; y++) {
 			for (int x = 0; x < dep.cols; x++) {
 				dep.at<float>(y, x) /= all_rate_map.at<float>(y, x);
 			}
 		}
+		std::cerr << "CKPT11 dep /= all_rate_map done" << std::endl;
 
 		path depth_img_path = problem.result_folder / path("depth_anything_" + std::to_string(problem.iteration) + ".jpg");
 		ShowDepthMap(depth_img_path, dep, cameras[0].depth_min * 0.6f, cameras[0].depth_max * 1.2f);
+		std::cerr << "CKPT12 ShowDepthMap done" << std::endl;
 
 		if (dep.cols != width || dep.rows != height) {
 			RescaleMatToTargetSize<float>(dep, dep, cv::Size2i(width, height));
 		}
+		std::cerr << "CKPT13 rescale done, dep.rows=" << dep.rows << " dep.cols=" << dep.cols << std::endl;
 
 		cv::Mat normalMap(dep.rows, dep.cols, CV_32FC3);
 
@@ -1408,8 +1463,10 @@ void APD::InuputInitialization() {
 			}
 		}
 
+		std::cerr << "CKPT14 normalMap loop done" << std::endl;
 		path normal_img_path = problem.result_folder / path("normal_COLMAP.jpg");
 		ShowNormalMap(normal_img_path, normalMap);
+		std::cerr << "CKPT15 ShowNormalMap done" << std::endl;
 
 		for (int col = 0; col < width; ++col) {
 			for (int row = 0; row < height; ++row) {
@@ -1420,6 +1477,7 @@ void APD::InuputInitialization() {
 				plane_hypotheses_host[center].w = dep.at<float>(row, col);
 			}
 		}
+		std::cerr << "CKPT16 plane_hypotheses_host fill done" << std::endl;
 
 	}
 
@@ -1770,6 +1828,23 @@ void RescaleImageAndCamera(cv::Mat& src, cv::Mat& dst, cv::Mat& depth, Camera& c
 	camera.height = rows;
 }
 
+// Maps a C++ element type to its OpenCV Mat type constant. cv::DataType<T>::type
+// covers the scalar/Vec<> types used here, except `unsigned int`, which OpenCV has
+// no native element type for; the codebase uses it interchangeably with `int`
+// (both CV_32S, 4 bytes), so that's the correct mapping.
+template <typename T>
+struct RescaleCvType {
+	static const int value = cv::DataType<T>::type;
+};
+template <>
+struct RescaleCvType<unsigned int> {
+	static const int value = CV_32S;
+};
+template <>
+struct RescaleCvType<cv::Vec3f> {
+	static const int value = CV_32FC3;
+};
+
 template <typename TYPE>
 void RescaleMatToTargetSize(const cv::Mat& src, cv::Mat& dst, const cv::Size2i& target_size) {
 	if (src.cols == target_size.width && src.rows == target_size.height) {
@@ -1778,7 +1853,14 @@ void RescaleMatToTargetSize(const cv::Mat& src, cv::Mat& dst, const cv::Size2i& 
 	const float scale_x = target_size.width / static_cast<float>(src.cols);
 	const float scale_y = target_size.height / static_cast<float>(src.rows);
 
-	int type = src.type();
+	// Use the template element type, not src.type(): src can be an empty/default
+	// cv::Mat (e.g. when ReadBinMat silently failed to load its source file), whose
+	// type() is CV_8UC1 regardless of TYPE. Allocating dst from src.type() in that
+	// case under-allocates it (1 byte/px) while every caller reads/writes it as
+	// TYPE (e.g. int/float, 4 bytes/px) via .at<TYPE>()/.ptr<TYPE>(), causing an
+	// out-of-bounds read/write (observed as a SEGV inside cudaMemcpy's host-side
+	// read, or heap corruption surfacing later as an unrelated cv::Exception).
+	int type = RescaleCvType<TYPE>::value;
 	cv::Mat src_clone = src.clone();
 	dst = cv::Mat(target_size.height, target_size.width, type);
 

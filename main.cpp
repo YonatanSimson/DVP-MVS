@@ -418,7 +418,31 @@ void ProcessProblem(const Problem& problem) {
 	std::cout << "Cost time: " << std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() << " ms" << std::endl;
 }
 
+// A problem with no valid source views (every pair.txt candidate scored 0 -- e.g. a
+// frame whose own COLMAP registration has zero triangulated sparse points, so it has
+// nothing to share with any neighbour) can't run PatchMatch: ProcessProblem/RunFusion
+// assume at least one source view alongside the ref image. Write well-formed,
+// all-invalid depth/normal/weak files instead, so RunFusion's `if (ref_depth <= 0.0)
+// continue;` skips every pixel of this image rather than crashing on a 0x0 Mat.
+void WriteDegenerateProblemOutputs(const Problem& problem) {
+	path image_path = problem.dense_folder / path("images") / path(ToFormatIndex(problem.ref_image_id) + ".jpg");
+	cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_COLOR);
+	cv::Mat depth = cv::Mat::zeros(image.rows, image.cols, CV_32FC1);
+	cv::Mat normal = cv::Mat::zeros(image.rows, image.cols, CV_32FC3);
+	cv::Mat weak = cv::Mat::zeros(image.rows, image.cols, CV_8UC1);
+	WriteBinMat(problem.result_folder / path("depths.dmb"), depth);
+	WriteBinMat(problem.result_folder / path("APD_normals.dmb"), normal);
+	WriteBinMat(problem.result_folder / path("weak.bin"), weak);
+	std::cout << "Problem " << problem.ref_image_id
+		<< " has no valid source views -- skipping PatchMatch, writing empty depth/normal/weak.\n";
+}
+
 int main(int argc, char** argv) {
+	// DIAGNOSTIC: force OpenCV single-threaded to test whether the Release-only
+	// "cv::Exception ... setSize/OutOfMemoryError" crash is a TBB data race on a
+	// shared cv::Mat (varies between runs -> negative size vs. huge allocation is
+	// the classic signature of a torn read of a struct being concurrently written).
+	cv::setNumThreads(1);
 	if (argc < 2) {
 		std::cerr << "USAGE: APD dense_folder\n";
 		return EXIT_FAILURE;
@@ -431,7 +455,28 @@ int main(int argc, char** argv) {
 	if (argc == 3) {
 		gpu_index = std::atoi(argv[2]);
 	}
-	cudaSetDevice(gpu_index);
+
+	int device_count = 0;
+	cudaError_t err = cudaGetDeviceCount(&device_count);
+	if (err != cudaSuccess) {
+		std::cerr << "cudaGetDeviceCount failed: " << cudaGetErrorString(err) << std::endl;
+		return EXIT_FAILURE;
+	}
+	if (device_count == 0) {
+		std::cerr << "No CUDA-capable GPU detected. Check NVIDIA driver/runtime installation and CUDA_VISIBLE_DEVICES." << std::endl;
+		return EXIT_FAILURE;
+	}
+	if (gpu_index < 0 || gpu_index >= device_count) {
+		std::cerr << "Requested GPU index " << gpu_index << " is invalid. Available GPUs: " << device_count << std::endl;
+		return EXIT_FAILURE;
+	}
+
+	err = cudaSetDevice(gpu_index);
+	if (err != cudaSuccess) {
+		std::cerr << "cudaSetDevice(" << gpu_index << ") failed: " << cudaGetErrorString(err) << std::endl;
+		return EXIT_FAILURE;
+	}
+	std::cout << "CUDA device initialized successfully: GPU " << gpu_index << std::endl;
 	// generate problems
 	std::vector<Problem> problems;
 	GenerateSampleList(dense_folder, problems);
@@ -442,12 +487,18 @@ int main(int argc, char** argv) {
 	int num_images = problems.size();
 	std::cout << "There are " << num_images << " problems needed to be processed!" << std::endl;
 
+	for (auto& problem : problems) {
+		if (problem.src_image_ids.empty()) {
+			WriteDegenerateProblemOutputs(problem);
+		}
+	}
+
 	int round_num = ComputeRoundNum(problems);
 
 	std::cout << "Round nums: " << round_num << std::endl;
 	int iteration_index = 0;
 	bool flag = true;
-	for (int i = 0; i < round_num - 1; ++i) {
+	for (int i = 0; i < round_num; ++i) {
 		/*if(params->)*/
 		for (auto& problem : problems) {
 			problem.iteration = iteration_index;
@@ -476,7 +527,7 @@ int main(int argc, char** argv) {
 				params.max_iterations = 3;
 				params.weak_peak_radius = 6;
 			}
-			if (flag) {
+			if (flag && !problem.src_image_ids.empty()) {
 				GetProblemEdges(problem); // 注意要先得到 scale_size
 				ProcessProblem(problem);
 			}
@@ -502,7 +553,7 @@ int main(int argc, char** argv) {
 					params.max_iterations = 3;
 					params.weak_peak_radius = MAX(4 - 2 * j, 2);
 				}
-				if (flag) {
+				if (flag && !problem.src_image_ids.empty()) {
 					ProcessProblem(problem);
 				}
 			}

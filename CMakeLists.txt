@@ -1,38 +1,26 @@
-cmake_minimum_required (VERSION 2.8)
-project (APD)
+cmake_minimum_required(VERSION 3.18)
+project(APD LANGUAGES CXX CUDA)
 
-set(Boost_USE_STATIC_LIBS ON)
+set(Boost_USE_STATIC_LIBS OFF)
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 
-# recommand >=3.3.0
-set(OpenCV_DIR "E:/opencv-4.2.0/opencv/build")
 find_package(OpenCV REQUIRED)
-# recommand >=1.62.0
 find_package(Boost REQUIRED COMPONENTS filesystem system)
-# recommand >=10.2.
-find_package(CUDA REQUIRED )
+find_package(CUDAToolkit REQUIRED)
 
-include_directories(
-${OpenCV_INCLUDE_DIRS}
-${Boost_INCLUDE_DIRS})
-include_directories(.)
-
-set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-O3 --use_fast_math --maxrregcount=128 --ptxas-options=-v -std=c++11 --compiler-options -Wall -gencode arch=compute_80,code=sm_80)
+include_directories(${OpenCV_INCLUDE_DIRS} ${Boost_INCLUDE_DIRS} .)
 
 if(CMAKE_COMPILER_IS_GNUCXX)
-    add_definitions(-std=c++11)
-    add_definitions(-pthread)
-    add_definitions(-Wall)
-    add_definitions(-Wextra)
-    add_definitions(-pedantic)
-    add_definitions(-Wno-unused-function)
-    add_definitions(-Wno-switch)
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3 -ffast-math -march=native")
+    add_compile_options(-std=c++11 -pthread -Wall -Wextra -Wno-unused-function -Wno-switch)
 endif()
 
-cuda_add_executable(
-    APD
+set(CMAKE_CUDA_STANDARD 11)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_ARCHITECTURES 120)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math --maxrregcount=128 --ptxas-options=-v -std=c++11 -Xcompiler=-Wall -gencode arch=compute_120,code=sm_120")
+
+add_executable(APD
     main.h
     APD.h
     APD.cpp
@@ -41,6 +29,8 @@ cuda_add_executable(
 )
 
 target_link_libraries(APD
-${Boost_LIBRARIES}
-"${OpenCV_LIBS}"
+    PRIVATE
+        ${Boost_LIBRARIES}
+        ${OpenCV_LIBS}
+        CUDA::cudart
 )
