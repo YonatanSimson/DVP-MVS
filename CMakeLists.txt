@@ -26,6 +26,8 @@ add_executable(APD
     APD.cpp
     APD.cu
     main.cpp
+    Checkpoint.h
+    Checkpoint.cpp
 )
 
 target_link_libraries(APD

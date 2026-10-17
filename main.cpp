@@ -1,5 +1,6 @@
 ﻿#include "main.h"
 #include "APD.h"
+#include "Checkpoint.h"
 
 using namespace boost::filesystem;
 
@@ -498,13 +499,21 @@ int main(int argc, char** argv) {
 	std::cout << "Round nums: " << round_num << std::endl;
 	int iteration_index = 0;
 	bool flag = true;
+	// Resume support: skip re-doing any iteration a previous (crashed) run
+	// already finished for every problem. See Checkpoint.h for why this has
+	// to be whole-iteration granularity rather than per-problem.
+	int resume_after_iteration = ReadCheckpoint(dense_folder);
+	if (resume_after_iteration >= 0) {
+		std::cout << "Resuming: iterations 0.." << resume_after_iteration
+			<< " already completed, continuing from iteration " << (resume_after_iteration + 1) << std::endl;
+	}
 	for (int i = 0; i < round_num; ++i) {
 		/*if(params->)*/
 		for (auto& problem : problems) {
 			problem.iteration = iteration_index;
 			// 下面还有
 			if (problem.ref_image_id == 93 && problem.iteration == 13) flag = true;
-			problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale 
+			problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale
 			{
 				auto& params = problem.params;
 				if (i == 0) {
@@ -527,17 +536,18 @@ int main(int argc, char** argv) {
 				params.max_iterations = 3;
 				params.weak_peak_radius = 6;
 			}
-			if (flag && !problem.src_image_ids.empty()) {
+			if (flag && !problem.src_image_ids.empty() && iteration_index > resume_after_iteration) {
 				GetProblemEdges(problem); // 注意要先得到 scale_size
 				ProcessProblem(problem);
 			}
 		}
+		WriteCheckpoint(dense_folder, iteration_index);
 		iteration_index++;
 		for (int j = 0; j < 3; ++j) {
 			for (auto& problem : problems) {
 				problem.iteration = iteration_index;
 				if (problem.ref_image_id == 93 && problem.iteration == 13) flag = true;
-				problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale 
+				problem.scale_size = static_cast<int>(std::pow(2, round_num - 1 - i)); // scale
 				{
 					auto& params = problem.params;
 					params.state = REFINE_ITER;
@@ -553,10 +563,11 @@ int main(int argc, char** argv) {
 					params.max_iterations = 3;
 					params.weak_peak_radius = MAX(4 - 2 * j, 2);
 				}
-				if (flag && !problem.src_image_ids.empty()) {
+				if (flag && !problem.src_image_ids.empty() && iteration_index > resume_after_iteration) {
 					ProcessProblem(problem);
 				}
 			}
+			WriteCheckpoint(dense_folder, iteration_index);
 			iteration_index++;
 		}
 		std::cout << "Round: " << i << " done\n";
